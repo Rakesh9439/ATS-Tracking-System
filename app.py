@@ -2,109 +2,466 @@ import streamlit as st
 import pdf2image
 import io
 import json
-import base64
-import google.generativeai as genai
 
-genai.configure(api_key=st.secrets.GOOGLE_API_KEY)
-model = genai.GenerativeModel("gemini-3.5-flash-lite")
-# Define cached functions
+from google import genai
+from google.genai import types
+
+
+# =========================================================
+# Gemini Configuration
+# =========================================================
+
+client = genai.Client(
+    api_key=st.secrets["GOOGLE_API_KEY"]
+)
+
+
+# =========================================================
+# Gemini Response Functions
+# =========================================================
+
 @st.cache_data()
-def get_gemini_response(input, pdf_content, prompt):
-    response = model.generate_content([input, pdf_content[0], prompt])
+def get_gemini_response(input_text, pdf_content, prompt):
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[
+            input_text,
+            pdf_content,
+            prompt
+        ]
+    )
+
     return response.text
 
+
 @st.cache_data()
-def get_gemini_response_keywords(input, pdf_content, prompt):
-    response = model.generate_content([input, pdf_content[0], prompt])
-    return json.loads(response.text[8:-4])
+def get_gemini_response_keywords(input_text, pdf_content, prompt):
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[
+            input_text,
+            pdf_content,
+            prompt
+        ]
+    )
+
+    text = response.text.strip()
+
+    # Remove Markdown JSON code fences
+    if text.startswith("```json"):
+        text = text[7:]
+
+    if text.startswith("```"):
+        text = text[3:]
+
+    if text.endswith("```"):
+        text = text[:-3]
+
+    text = text.strip()
+
+    return json.loads(text)
+
+
+# =========================================================
+# PDF Processing
+# =========================================================
 
 @st.cache_data()
 def input_pdf_setup(uploaded_file):
-    if uploaded_file is not None:
-        images = pdf2image.convert_from_bytes(uploaded_file.read())
-        first_page = images[0]
-        img_byte_arr = io.BytesIO()
-        first_page.save(img_byte_arr, format='JPEG')
-        img_byte_arr = img_byte_arr.getvalue()
-        pdf_parts = [
-            {
-                "mime_type": "image/jpeg",
-                "data": base64.b64encode(img_byte_arr).decode()
-            }
-        ]
-        return pdf_parts
-    else:
+
+    if uploaded_file is None:
         raise FileNotFoundError("No file uploaded")
 
+    # Convert PDF into images
+    images = pdf2image.convert_from_bytes(
+        uploaded_file.read()
+    )
+
+    if not images:
+        raise ValueError("Could not read the PDF")
+
+    # Currently using the first page
+    first_page = images[0]
+
+    # Convert image to bytes
+    img_byte_arr = io.BytesIO()
+
+    first_page.save(
+        img_byte_arr,
+        format="JPEG"
+    )
+
+    img_bytes = img_byte_arr.getvalue()
+
+    # Convert image to Gemini Part
+    image_part = types.Part.from_bytes(
+        data=img_bytes,
+        mime_type="image/jpeg"
+    )
+
+    return image_part
+
+
+# =========================================================
 # Streamlit App
+# =========================================================
 
-st.set_page_config(page_title="ATS Resume Scanner")
+st.set_page_config(
+    page_title="ATS Resume Scanner",
+    page_icon="📄",
+    layout="centered"
+)
+
 st.header("Application Tracking System")
-input_text = st.text_area("Job Description: ", key="input")
-uploaded_file = st.file_uploader("Upload your resume(PDF)...", type=["pdf"])
 
-if 'resume' not in st.session_state:
+
+# =========================================================
+# Job Description
+# =========================================================
+
+input_text = st.text_area(
+    "Job Description:",
+    key="input",
+    height=200
+)
+
+
+# =========================================================
+# Resume Upload
+# =========================================================
+
+uploaded_file = st.file_uploader(
+    "Upload your resume (PDF)...",
+    type=["pdf"]
+)
+
+
+# =========================================================
+# Session State
+# =========================================================
+
+if "resume" not in st.session_state:
     st.session_state.resume = None
 
+
 if uploaded_file is not None:
-    st.write("PDF Uploaded Successfully")
+
+    st.write("✅ PDF Uploaded Successfully")
+
     st.session_state.resume = uploaded_file
 
-col1, col2, col3 = st.columns(3, gap="medium")
+
+# =========================================================
+# Buttons
+# =========================================================
+
+col1, col2, col3 = st.columns(
+    3,
+    gap="medium"
+)
+
 
 with col1:
-    submit1 = st.button("Tell Me About the Resume")
+    submit1 = st.button(
+        "Tell Me About the Resume"
+    )
+
 
 with col2:
-    submit2 = st.button("Get Keywords")
+    submit2 = st.button(
+        "Get Keywords"
+    )
+
 
 with col3:
-    submit3 = st.button("Percentage match")
+    submit3 = st.button(
+        "Percentage Match"
+    )
+
+
+# =========================================================
+# Prompts
+# =========================================================
 
 input_prompt1 = """
- You are an experienced Technical Human Resource Manager, your task is to review the provided resume against the job description. 
- Please share your professional evaluation on whether the candidate's profile aligns with the role. 
- Highlight the strengths and weaknesses of the applicant in relation to the specified job requirements.
+You are an experienced Technical Human Resource Manager.
+
+Your task is to review the provided resume against the provided job description.
+
+Please provide a professional evaluation of whether the candidate's profile aligns with the role.
+
+Highlight:
+
+1. Candidate strengths
+2. Candidate weaknesses
+3. Relevant skills
+4. Missing skills
+5. Overall suitability for the role
+
+Base your response only on the resume and job description provided.
 """
+
 
 input_prompt2 = """
-As an expert ATS (Applicant Tracking System) scanner with an in-depth understanding of AI and ATS functionality, 
-your task is to evaluate a resume against a provided job description. Please identify the specific skills and keywords 
-necessary to maximize the impact of the resume and provide response in json format as {Technical Skills:[], Analytical Skills:[], Soft Skills:[]}.
-Note: Please do not make up the answer only answer from job description provided"""
+You are an expert ATS (Applicant Tracking System) scanner.
 
-input_prompt3 = """
-You are a skilled ATS (Applicant Tracking System) scanner with a deep understanding of data science and ATS functionality, 
-your task is to evaluate the resume against the provided job description. Give me the percentage of match if the resume matches
-the job description. First the output should come as percentage and then keywords missing and last final thoughts.
+Evaluate the resume against the provided job description.
+
+Identify the specific skills and keywords from the job description that are relevant for the candidate.
+
+Return ONLY valid JSON in exactly this structure:
+
+{
+    "Technical Skills": [],
+    "Analytical Skills": [],
+    "Soft Skills": []
+}
+
+Do not add Markdown.
+Do not add explanations outside the JSON.
+
+Only identify skills and keywords that actually appear in the job description.
+Do not make up skills.
 """
 
+
+input_prompt3 = """
+You are a skilled ATS (Applicant Tracking System) scanner.
+
+Evaluate the provided resume against the provided job description.
+
+Calculate an estimated percentage match between the resume and job description.
+
+Your response must contain:
+
+1. Match Percentage
+2. Missing Keywords
+3. Final Thoughts
+
+Example:
+
+Match Percentage: 85%
+
+Missing Keywords:
+- Docker
+- Kubernetes
+
+Final Thoughts:
+The candidate is a strong match because...
+
+Base your evaluation only on the provided resume and job description.
+"""
+
+
+# =========================================================
+# Tell Me About the Resume
+# =========================================================
+
 if submit1:
+
     if st.session_state.resume is not None:
-        pdf_content = input_pdf_setup(st.session_state.resume)
-        response = get_gemini_response(input_prompt1, pdf_content, input_text)
-        st.subheader("The Response is")
-        st.write(response)
+
+        if not input_text.strip():
+            st.warning(
+                "Please enter the job description."
+            )
+
+        else:
+
+            try:
+
+                with st.spinner(
+                    "Analyzing resume..."
+                ):
+
+                    pdf_content = input_pdf_setup(
+                        st.session_state.resume
+                    )
+
+                    response = get_gemini_response(
+                        input_text,
+                        pdf_content,
+                        input_prompt1
+                    )
+
+                st.subheader(
+                    "Resume Analysis"
+                )
+
+                st.write(response)
+
+            except Exception as e:
+
+                st.error(
+                    f"Error analyzing resume: {e}"
+                )
+
     else:
-        st.write("Please upload the resume")
+
+        st.warning(
+            "Please upload the resume."
+        )
+
+
+# =========================================================
+# Get Keywords
+# =========================================================
 
 elif submit2:
+
     if st.session_state.resume is not None:
-        pdf_content = input_pdf_setup(st.session_state.resume)
-        response = get_gemini_response_keywords(input_prompt2, pdf_content, input_text)
-        st.subheader("Skills are:")
-        if response is not None:
-            st.write(f"Technical Skills: {', '.join(response['Technical Skills'])}.")
-            st.write(f"Analytical Skills: {', '.join(response['Analytical Skills'])}.")
-            st.write(f"Soft Skills: {', '.join(response['Soft Skills'])}.")
+
+        if not input_text.strip():
+
+            st.warning(
+                "Please enter the job description."
+            )
+
+        else:
+
+            try:
+
+                with st.spinner(
+                    "Finding relevant keywords..."
+                ):
+
+                    pdf_content = input_pdf_setup(
+                        st.session_state.resume
+                    )
+
+                    response = get_gemini_response_keywords(
+                        input_text,
+                        pdf_content,
+                        input_prompt2
+                    )
+
+                st.subheader(
+                    "Skills & Keywords"
+                )
+
+                if response:
+
+                    technical_skills = response.get(
+                        "Technical Skills",
+                        []
+                    )
+
+                    analytical_skills = response.get(
+                        "Analytical Skills",
+                        []
+                    )
+
+                    soft_skills = response.get(
+                        "Soft Skills",
+                        []
+                    )
+
+                    st.write(
+                        "### Technical Skills"
+                    )
+
+                    if technical_skills:
+                        st.write(
+                            ", ".join(technical_skills)
+                        )
+                    else:
+                        st.write(
+                            "No technical skills found."
+                        )
+
+                    st.write(
+                        "### Analytical Skills"
+                    )
+
+                    if analytical_skills:
+                        st.write(
+                            ", ".join(analytical_skills)
+                        )
+                    else:
+                        st.write(
+                            "No analytical skills found."
+                        )
+
+                    st.write(
+                        "### Soft Skills"
+                    )
+
+                    if soft_skills:
+                        st.write(
+                            ", ".join(soft_skills)
+                        )
+                    else:
+                        st.write(
+                            "No soft skills found."
+                        )
+
+            except json.JSONDecodeError:
+
+                st.error(
+                    "Gemini returned an invalid JSON response. Please try again."
+                )
+
+            except Exception as e:
+
+                st.error(
+                    f"Error finding keywords: {e}"
+                )
+
     else:
-        st.write("Please upload the resume")
+
+        st.warning(
+            "Please upload the resume."
+        )
+
+
+# =========================================================
+# Percentage Match
+# =========================================================
 
 elif submit3:
+
     if st.session_state.resume is not None:
-        pdf_content = input_pdf_setup(st.session_state.resume)
-        response = get_gemini_response(input_prompt3, pdf_content, input_text)
-        st.subheader("The Response is")
-        st.write(response)
+
+        if not input_text.strip():
+
+            st.warning(
+                "Please enter the job description."
+            )
+
+        else:
+
+            try:
+
+                with st.spinner(
+                    "Calculating resume match..."
+                ):
+
+                    pdf_content = input_pdf_setup(
+                        st.session_state.resume
+                    )
+
+                    response = get_gemini_response(
+                        input_text,
+                        pdf_content,
+                        input_prompt3
+                    )
+
+                st.subheader(
+                    "Resume Match"
+                )
+
+                st.write(response)
+
+            except Exception as e:
+
+                st.error(
+                    f"Error calculating match: {e}"
+                )
+
     else:
-        st.write("Please upload the resume")
+
+        st.warning(
+            "Please upload the resume."
+        )
